@@ -1,0 +1,36 @@
+name: Freshservice Daily Alerts
+
+on:
+  schedule:
+    # O horário é em UTC. 12:00 UTC = 08:00 em Manaus (GMT-4).
+    - cron: '0 14 1,15 * *'
+  workflow_dispatch: # Permite que você rode manualmente pelo site do GitHub para testar
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Alert Script
+        env:
+          # Aqui ele puxa dos Secrets que você cadastrou no passo 2
+          FRESHSERVICE_API_KEY: ${{ secrets.FRESHSERVICE_API_KEY }}
+          FRESHSERVICE_DOMAIN: ${{ secrets.FRESHSERVICE_DOMAIN }}
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          DAYS_TO_WARN: ${{secrets.DAYS_TO_WARN}}
+          DAYS_TO_CRITICAL: ${{secrets.DAYS_TO_CRITICAL}}
+        run: python freshservice_alerts_v4.py
