@@ -3,8 +3,7 @@ name: Freshservice Daily Alerts
 on:
   schedule:
     # O horário é em UTC. 12:00 UTC = 08:00 em Manaus (GMT-4).
-    - cron: '36 18 1,12 * *'
-  workflow_dispatch: # Permite que você rode manualmente pelo site do GitHub para testar
+    - cron: '40 18 1,12 * *'
 
 jobs:
   build:
