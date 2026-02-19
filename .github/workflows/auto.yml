@@ -2,7 +2,7 @@ name: Freshservice Daily Alerts
 
 on:
   schedule:
-    - cron: '50 11 * * *'
+    - cron: '50 11 1,19 * *'
   workflow_dispatch: 
 
 jobs:
