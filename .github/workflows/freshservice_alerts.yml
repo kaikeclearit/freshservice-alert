@@ -1,0 +1,42 @@
+name: Relatório de Vencimentos Freshservice
+
+on:
+  schedule:
+    # Minuto(0) Hora(15 UTC = 11:00 Manaus) Dia(1,15) Mês(*) Dia_da_semana(*)
+    - cron: '0 15 1,15 * *'
+  
+  # Esse gatilho abaixo é a salvação! Ele cria aquele botão "Run workflow" 
+  # no GitHub para você poder rodar e testar manualmente a hora que quiser.
+  workflow_dispatch: 
+
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fazer o checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # Versão estável
+
+      - name: Instalar dependências (requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Executar o script do Freshservice
+        env:
+          # Mapeando os Secrets do GitHub para as variáveis do seu script
+          FRESHSERVICE_API_KEY: ${{ secrets.FRESHSERVICE_API_KEY }}
+          FRESHSERVICE_DOMAIN: ${{ secrets.FRESHSERVICE_DOMAIN }}
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          DAYS_TO_WARN: 365
+          
+          # Se você decidiu gerenciar os emails pelo GitHub ao invés de fixar lá no Make,
+          # basta tirar o '#' da linha abaixo e criar o secret EMAIL_TO
+          # EMAIL_TO: ${{ secrets.EMAIL_TO }} 
+        run: |
+          python freshservice_alerts_v4.py
