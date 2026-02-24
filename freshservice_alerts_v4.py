@@ -1,13 +1,11 @@
 import time
 import requests
-import pandas as pd
-from tqdm import tqdm
-from dotenv import load_dotenv
 import os
-import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+from tqdm import tqdm
+from dotenv import load_dotenv
 
 # Configuração de logging
 logging.basicConfig(
@@ -30,9 +28,8 @@ DOMAIN = os.getenv("FRESHSERVICE_DOMAIN")
 BASE_URL = f"https://{DOMAIN}/api/v2"
 AUTH = (API_KEY, "X")
 
-# Configurações de alerta
-DAYS_WARN = int(os.getenv("DAYS_TO_WARN", 120))
-DAYS_CRITICAL = int(os.getenv("DAYS_TO_CRITICAL", 90))
+# Configurações de alerta (garantindo 365 dias limite de busca)
+DAYS_WARN = int(os.getenv("DAYS_TO_WARN", 365))
 MAKE_URL = os.getenv("MAKE_WEBHOOK_URL")
 EMAIL_TO = os.getenv("EMAIL_TO")
 MAX_ASSETS = int(os.getenv("MAX_ASSETS", 0)) or None
@@ -62,7 +59,7 @@ EXCLUDED_ASSETS = {
 # FUNÇÕES AUXILIARES
 # ==========================================
 
-def get_paged_results(endpoint: str, params: Optional[Dict] = None, desc: str = "Baixando dados") -> List[Dict]:
+def get_paged_results(endpoint: str, params: Optional[Dict] = None, desc: str = "Baixando") -> List[Dict]:
     if params is None: params = {}
     page, results = 1, []
     params["per_page"] = 100
@@ -78,11 +75,9 @@ def get_paged_results(endpoint: str, params: Optional[Dict] = None, desc: str = 
             resp.raise_for_status()
             data = resp.json()
             key = next((k for k in data.keys() if isinstance(data[k], list)), None)
-            if not key: break
+            if not key or not data[key]: break
             batch = data[key]
-            if not batch: break
             results.extend(batch)
-            if page % 5 == 0: logger.info(f"{desc}: Página {page} ({len(results)} itens)")
             if len(batch) < 100: break
             page += 1
             time.sleep(0.1)
@@ -101,15 +96,13 @@ def extract_fields_smart(type_fields: Dict) -> tuple:
     serial, expiry = None, None
     normalized = {k.lower(): v for k, v in type_fields.items() if v and str(v).lower() not in ['none', 'n/a', '']}
     
-    serial_keywords = ["serial", "service_tag", "srie", "nmero", "imei", "asset_tag"]
-    for kw in serial_keywords:
+    for kw in ["serial", "service_tag", "srie", "nmero", "imei", "asset_tag"]:
         found = next((k for k in normalized if kw in k), None)
         if found: 
             serial = normalized[found]
             break
             
-    date_keywords = ["warranty_expiry", "expiry_date", "final_de_suporte", "support_end", "validade", "vencimento"]
-    for kw in date_keywords:
+    for kw in ["warranty_expiry", "expiry_date", "final_de_suporte", "support_end", "validade", "vencimento"]:
         found = next((k for k in normalized if kw in k), None)
         if found:
             val = str(normalized[found])
@@ -120,64 +113,74 @@ def extract_fields_smart(type_fields: Dict) -> tuple:
 
 def parse_date(date_string: str) -> Optional[datetime]:
     if not date_string: return None
-    try:
-        return datetime.strptime(str(date_string)[:10], "%Y-%m-%d")
+    try: return datetime.strptime(str(date_string)[:10], "%Y-%m-%d")
     except: return None
 
-def categorize_alert(days: int) -> str:
-    if days <= DAYS_CRITICAL: return "critical"
-    if days <= 30: return "warning"
-    return "info"
+# ==========================================
+# A MÁGICA ACONTECE AQUI: Estilos prontos para o Make
+# ==========================================
+def get_style(days: int) -> dict:
+    # Usando o círculo ASCII universal (&#9679;) colorido via HTML. O Outlook nunca bloqueia isso.
+    if days < 0: return {"level": "vencido", "emoji": "<span style='color: #721c24; font-size: 16px;'>&#9679;</span>", "bg": "#f8d7da", "text": "#721c24"}
+    if days <= 90: return {"level": "critical", "emoji": "<span style='color: #d32f2f; font-size: 16px;'>&#9679;</span>", "bg": "#ffebee", "text": "#d32f2f"}
+    if days <= 120: return {"level": "warning", "emoji": "<span style='color: #856404; font-size: 16px;'>&#9679;</span>", "bg": "#fff3cd", "text": "#856404"}
+    return {"level": "info", "emoji": "<span style='color: #0056b3; font-size: 16px;'>&#9679;</span>", "bg": "#ffffff", "text": "#333333"}
 
 def clean(val):
-    """Remove quebras de linha e espaços extras para não quebrar o Make/HTML"""
     if val is None: return "N/A"
     return str(val).strip().replace('\n', ' ').replace('\r', '')
 
 def send_to_make(asset_alerts: List[Dict], contract_alerts: List[Dict]) -> bool:
     if not MAKE_URL: return False
     
-    # Prepara listas limpas
-    clean_assets = [{
-        "asset_name": clean(a["Asset"]),
-        "asset_tag": clean(a["Tag"]),
-        "serial_number": clean(a["Serial"]),
-        "contract_name": clean(a["Contrato"]) if a["Contrato"] else "Sem contrato",
-        "expiry_date": a["Vencimento Real"],
-        "days_remaining": a["Dias"],
-        "alert_level": a["Nivel"]
-    } for a in asset_alerts]
+    clean_assets = []
+    for a in asset_alerts:
+        style = get_style(a["Dias"])
+        clean_assets.append({
+            "asset_name": clean(a["Asset"]),
+            "asset_tag": clean(a["Tag"]),
+            "serial_number": clean(a["Serial"]),
+            "contract_name": clean(a["Contrato"]) if a["Contrato"] else "Sem contrato",
+            "expiry_date": a["Vencimento Real"],
+            "days_remaining": a["Dias"],
+            "alert_level": style["level"],
+            "emoji": style["emoji"],
+            "bg_color": style["bg"],
+            "text_color": style["text"]
+        })
 
-    clean_contracts = [{
-        "contract_name": clean(c["contract_name"]),
-        "contract_id": c["contract_id"],
-        "vendor": clean(c["vendor"]),
-        "end_date": c["end_date"],
-        "days_remaining": c["days_remaining"],
-        "alert_level": c["alert_level"]
-    } for c in contract_alerts]
+    clean_contracts = []
+    for c in contract_alerts:
+        style = get_style(c["days_remaining"])
+        clean_contracts.append({
+            "contract_name": clean(c["contract_name"]),
+            "contract_id": c["contract_id"],
+            "vendor": clean(c["vendor"]),
+            "end_date": c["end_date"],
+            "days_remaining": c["days_remaining"],
+            "alert_level": style["level"],
+            "emoji": style["emoji"],
+            "bg_color": style["bg"],
+            "text_color": style["text"]
+        })
 
-    # Sumário consolidado
-    all_alerts = asset_alerts + contract_alerts
+    all_alerts = clean_assets + clean_contracts
     payload = {
         "asset_alerts": clean_assets,
         "contract_alerts": clean_contracts,
         "summary": {
             "total_count": len(all_alerts),
-            "critical_count": len([x for x in all_alerts if x.get("Nivel") == "critical" or x.get("alert_level") == "critical"]),
-            "warning_count": len([x for x in all_alerts if x.get("Nivel") == "warning" or x.get("alert_level") == "warning"]),
-            "info_count": len([x for x in all_alerts if x.get("Nivel") == "info" or x.get("alert_level") == "info"])
+            "vencido_count": len([x for x in all_alerts if x["alert_level"] == "vencido"]),
+            "critical_count": len([x for x in all_alerts if x["alert_level"] == "critical"]),
+            "warning_count": len([x for x in all_alerts if x["alert_level"] == "warning"]),
+            "info_count": len([x for x in all_alerts if x["alert_level"] == "info"])
         },
         "recipient_email": EMAIL_TO,
-        "generated_at": datetime.now().isoformat(),
-        "config": {
-            "days_warning_threshold": DAYS_WARN,
-            "days_critical_threshold": DAYS_CRITICAL
-        }
+        "generated_at": datetime.now().isoformat()
     }
 
     try:
-        logger.info(f"🚀 Enviando {len(clean_assets)} ativos e {len(clean_contracts)} contratos para o Make...")
+        logger.info(f"Enviando para o Make: {len(all_alerts)} alertas (Vencidos: {payload['summary']['vencido_count']}, Críticos: {payload['summary']['critical_count']}, Alertas: {payload['summary']['warning_count']}, Infos: {payload['summary']['info_count']})")
         r = requests.post(MAKE_URL, json=payload, timeout=60)
         r.raise_for_status()
         logger.info(f"✅ Sucesso! Status: {r.status_code}")
@@ -191,15 +194,13 @@ def send_to_make(asset_alerts: List[Dict], contract_alerts: List[Dict]) -> bool:
 # ==========================================
 
 def main():
-    logger.info("INICIANDO V4 - ATIVOS E CONTRATOS")
+    logger.info("INICIANDO VERIFICAÇÃO DE VENCIMENTOS (INCLUINDO VENCIDOS E AVISOS ATÉ 365 DIAS)")
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     warning_limit = today + timedelta(days=DAYS_WARN)
 
-    # 1. Dados iniciais
     assets_raw = get_paged_results(f"{BASE_URL}/assets", desc="Assets")
     contracts_raw = get_paged_results(f"{BASE_URL}/contracts", desc="Contratos")
 
-    # 2. Analisar Contratos (Independente)
     contract_alerts = []
     asset_contract_map = {}
     
@@ -207,23 +208,21 @@ def main():
         c_id, name = c.get("id"), c.get("name")
         end_dt = parse_date(c.get("end_date"))
         
-        # Alerta de contrato
-        if end_dt and today <= end_dt <= warning_limit:
+        # Filtro: Pega o passado (vencidos) e o futuro até 365 dias
+        if end_dt and end_dt <= warning_limit:
+            days = (end_dt - today).days
             contract_alerts.append({
                 "contract_name": name,
                 "contract_id": c_id,
                 "vendor": c.get("vendor_name", "N/A"),
                 "end_date": end_dt.strftime("%d/%m/%Y"),
-                "days_remaining": (end_dt - today).days,
-                "alert_level": categorize_alert((end_dt - today).days)
+                "days_remaining": days
             })
         
-        # Mapeamento para os assets
-        assoc = get_paged_results(f"{BASE_URL}/contracts/{c_id}/associated-assets", desc=f"Assoc {name[:20]}")
+        assoc = get_paged_results(f"{BASE_URL}/contracts/{c_id}/associated-assets", desc=f"Assoc {name[:15]}")
         for a in assoc:
             asset_contract_map[a.get("id")] = {"name": name, "end": c.get("end_date")}
 
-    # 3. Analisar Assets
     asset_alerts = []
     if MAX_ASSETS: assets_raw = assets_raw[:MAX_ASSETS]
 
@@ -234,11 +233,11 @@ def main():
         serial, expiry = extract_fields_smart(det.get("type_fields", {}))
         c_info = asset_contract_map.get(det.get("id"), {})
         
-        # Prioriza data de garantia, depois contrato
         check_date = expiry if expiry else c_info.get("end")
         dt = parse_date(check_date)
         
-        if dt and today <= dt <= warning_limit:
+        # Filtro: Pega o passado (vencidos) e o futuro até 365 dias
+        if dt and dt <= warning_limit:
             days = (dt - today).days
             asset_alerts.append({
                 "Asset": det.get("name"),
@@ -246,12 +245,10 @@ def main():
                 "Serial": serial,
                 "Contrato": c_info.get("name"),
                 "Vencimento Real": dt.strftime("%d/%m/%Y"),
-                "Dias": days,
-                "Nivel": categorize_alert(days)
+                "Dias": days
             })
         time.sleep(0.05)
 
-    # 4. Finalização
     if asset_alerts or contract_alerts:
         send_to_make(asset_alerts, contract_alerts)
     else:
