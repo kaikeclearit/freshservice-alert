@@ -7,6 +7,12 @@ from typing import Dict, List, Optional
 from tqdm import tqdm
 from dotenv import load_dotenv
 
+# Criação da planilha para envio
+import pandas as pd
+import io
+import base64
+import jinja2
+
 # Configuração de logging
 logging.basicConfig(
     level=logging.INFO,
@@ -119,68 +125,84 @@ def parse_date(date_string: str) -> Optional[datetime]:
 # ==========================================
 # A MÁGICA ACONTECE AQUI: Estilos prontos para o Make
 # ==========================================
-def get_style(days: int) -> dict:
-    # Usando o círculo ASCII universal (&#9679;) colorido via HTML. O Outlook nunca bloqueia isso.
-    if days < 0: return {"level": "vencido", "emoji": "<span style='color: #721c24; font-size: 16px;'>&#9679;</span>", "bg": "#f8d7da", "text": "#721c24"}
-    if days <= 90: return {"level": "critical", "emoji": "<span style='color: #d32f2f; font-size: 16px;'>&#9679;</span>", "bg": "#ffebee", "text": "#d32f2f"}
-    if days <= 120: return {"level": "warning", "emoji": "<span style='color: #856404; font-size: 16px;'>&#9679;</span>", "bg": "#fff3cd", "text": "#856404"}
-    return {"level": "info", "emoji": "<span style='color: #0056b3; font-size: 16px;'>&#9679;</span>", "bg": "#ffffff", "text": "#333333"}
+# ==========================================
+# ESTILOS E TEXTOS LIMPOS (Sem HTML)
+# ==========================================
+# ==========================================
+# ESTILOS COM EMOJIS NATIVOS PARA EXCEL
+# ==========================================
+def get_style(days: int) -> str:
+    # O Excel lê esses emojis perfeitamente como texto
+    if days < 0: return "⚫ Vencido"
+    if days <= 90: return "🔴 Crítico"
+    if days <= 120: return "🟡 Atenção"
+    return "🔵 Info"
 
 def clean(val):
     if val is None: return "N/A"
     return str(val).strip().replace('\n', ' ').replace('\r', '')
 
+# ==========================================
+# FUNÇÃO DE ENVIO ATUALIZADA (SEM JINJA2)
+# ==========================================
 def send_to_make(asset_alerts: List[Dict], contract_alerts: List[Dict]) -> bool:
     if not MAKE_URL: return False
     
     clean_assets = []
     for a in asset_alerts:
-        style = get_style(a["Dias"])
         clean_assets.append({
-            "asset_name": clean(a["Asset"]),
-            "asset_tag": clean(a["Tag"]),
-            "serial_number": clean(a["Serial"]),
-            "contract_name": clean(a["Contrato"]) if a["Contrato"] else "Sem contrato",
-            "expiry_date": a["Vencimento Real"],
-            "days_remaining": a["Dias"],
-            "alert_level": style["level"],
-            "emoji": style["emoji"],
-            "bg_color": style["bg"],
-            "text_color": style["text"]
+            "Status": get_style(a["Dias"]), 
+            "Asset": clean(a["Asset"]),
+            "Tag": clean(a["Tag"]), 
+            "Serial": clean(a["Serial"]),
+            "Contrato": clean(a["Contrato"]) if a["Contrato"] else "Sem contrato",
+            "Vencimento": a["Vencimento Real"], 
+            "Dias Restantes": a["Dias"]
         })
 
     clean_contracts = []
     for c in contract_alerts:
-        style = get_style(c["days_remaining"])
         clean_contracts.append({
-            "contract_name": clean(c["contract_name"]),
-            "contract_id": c["contract_id"],
-            "vendor": clean(c["vendor"]),
-            "end_date": c["end_date"],
-            "days_remaining": c["days_remaining"],
-            "alert_level": style["level"],
-            "emoji": style["emoji"],
-            "bg_color": style["bg"],
-            "text_color": style["text"]
+            "Status": get_style(c["days_remaining"]), 
+            "Contrato": clean(c["contract_name"]), 
+            "ID": c["contract_id"], 
+            "Vencimento": c["end_date"], 
+            "Dias Restantes": c["days_remaining"]
         })
 
     all_alerts = clean_assets + clean_contracts
+
+    # Geração do Excel simples e direto (sem a função .style)
+    df_assets = pd.DataFrame(clean_assets)
+    df_contracts = pd.DataFrame(clean_contracts)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        if not df_assets.empty:
+            # Salvando direto, sem tentar pintar a linha
+            df_assets.to_excel(writer, sheet_name='Ativos', index=False)
+        if not df_contracts.empty:
+            df_contracts.to_excel(writer, sheet_name='Contratos', index=False)
+    
+    excel_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
+    filename_date = datetime.now().strftime("%d_%m_%Y")
+
     payload = {
-        "asset_alerts": clean_assets,
-        "contract_alerts": clean_contracts,
         "summary": {
             "total_count": len(all_alerts),
-            "vencido_count": len([x for x in all_alerts if x["alert_level"] == "vencido"]),
-            "critical_count": len([x for x in all_alerts if x["alert_level"] == "critical"]),
-            "warning_count": len([x for x in all_alerts if x["alert_level"] == "warning"]),
-            "info_count": len([x for x in all_alerts if x["alert_level"] == "info"])
+            "vencido_count": len([x for x in all_alerts if x.get("Dias Restantes", 0) < 0]),
+            "critical_count": len([x for x in all_alerts if 0 <= x.get("Dias Restantes", 0) <= 90]),
+            "warning_count": len([x for x in all_alerts if 91 <= x.get("Dias Restantes", 0) <= 120]),
+            "info_count": len([x for x in all_alerts if 121 <= x.get("Dias Restantes", 0) <= 365])
         },
         "recipient_email": EMAIL_TO,
-        "generated_at": datetime.now().isoformat()
+        "generated_at": datetime.now().isoformat(),
+        "file_name": f"Relatorio_Vencimentos_{filename_date}.xlsx",
+        "file_data": excel_base64
     }
 
     try:
-        logger.info(f"Enviando para o Make: {len(all_alerts)} alertas (Vencidos: {payload['summary']['vencido_count']}, Críticos: {payload['summary']['critical_count']}, Alertas: {payload['summary']['warning_count']}, Infos: {payload['summary']['info_count']})")
+        logger.info(f"Enviando Excel para o Make: {payload['summary']['total_count']} alertas no total.")
         r = requests.post(MAKE_URL, json=payload, timeout=60)
         r.raise_for_status()
         logger.info(f"✅ Sucesso! Status: {r.status_code}")
